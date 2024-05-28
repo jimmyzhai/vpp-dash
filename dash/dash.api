@@ -19,7 +19,7 @@
 option version = "0.1.0";
 import "vnet/interface_types.api";
 
-autoreply define dash_macswap_enable_disable {
+autoreply define dash_enable_disable {
   /* Client identifier, set from api_main.my_client_index */
   u32 client_index;
 

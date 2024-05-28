@@ -70,15 +70,6 @@ typedef enum
   DASH_N_NEXT,
 } dash_next_t;
 
-/*
- * Simple dual/single loop version, default version which will compile
- * everywhere.
- *
- * Node costs 30 clocks/pkt at a vector size of 51
- */
-
-#define VERSION_1 1
-#ifdef VERSION_1
 #define foreach_mac_address_offset              \
 _(0)                                            \
 _(1)                                            \
@@ -111,6 +102,7 @@ VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  u32 sw_if_index0, sw_if_index1;
 	  u8 tmp0[6], tmp1[6];
 	  ethernet_header_t *en0, *en1;
+	  dash_header_t *dh0, *dh1;
 	  u32 bi0, bi1;
 	  vlib_buffer_t *b0, *b1;
 
@@ -139,30 +131,41 @@ VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  b1 = vlib_get_buffer (vm, bi1);
 
-	  ASSERT (b0->current_data == 0);
-	  ASSERT (b1->current_data == 0);
+	  dh0 = vlib_buffer_get_current (b0);
+	  dh1 = vlib_buffer_get_current (b1);
+	  ASSERT(dh0->metadata_type == DASH_METADATA_PIPELINE2APP);
+	  ASSERT(dh1->metadata_type == DASH_METADATA_PIPELINE2APP);
 
+	  dash_flow_entry_t* flow0 = dash_flow_alloc();
+	  dash_flow_entry_t* flow1 = dash_flow_alloc();
+
+	  flow0->key  = dh0->p2a.flow_key;
+	  flow0->data = dh0->p2a.flow_data;
+	  flow1->key  = dh1->p2a.flow_key;
+	  flow1->data = dh1->p2a.flow_data;
+
+	  dash_flow_table_t *flow_table = dash_flow_table_get();
+	  dash_flow_table_add_entry (flow_table, flow0);
+	  flow0->timer_handle = TW (tw_timer_start) (&flow_table->flow_tw, flow0->index, 0, flow0->timeout);
+	  dash_flow_table_add_entry (flow_table, flow1);
+	  flow1->timer_handle = TW (tw_timer_start) (&flow_table->flow_tw, flow1->index, 0, flow1->timeout);
+
+	  vlib_buffer_advance (b0, -sizeof(ethernet_header_t));
+	  vlib_buffer_advance (b1, -sizeof(ethernet_header_t));
 	  en0 = vlib_buffer_get_current (b0);
 	  en1 = vlib_buffer_get_current (b1);
 
-	  /* This is not the fastest way to swap src + dst mac addresses */
-#define _(a) tmp0[a] = en0->src_address[a];
+	  /* FIXME */
+#define _(a) en0->src_address[a] = 0x07;
 	  foreach_mac_address_offset;
 #undef _
-#define _(a) en0->src_address[a] = en0->dst_address[a];
+#define _(a) en0->dst_address[a] = 0x02;
 	  foreach_mac_address_offset;
 #undef _
-#define _(a) en0->dst_address[a] = tmp0[a];
+#define _(a) en1->src_address[a] = 0x07;
 	  foreach_mac_address_offset;
 #undef _
-
-#define _(a) tmp1[a] = en1->src_address[a];
-	  foreach_mac_address_offset;
-#undef _
-#define _(a) en1->src_address[a] = en1->dst_address[a];
-	  foreach_mac_address_offset;
-#undef _
-#define _(a) en1->dst_address[a] = tmp1[a];
+#define _(a) en1->dst_address[a] = 0x02;
 	  foreach_mac_address_offset;
 #undef _
 
@@ -216,6 +219,7 @@ VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  u32 sw_if_index0;
 	  u8 tmp0[6];
 	  ethernet_header_t *en0;
+	  dash_header_t *dh0;
 
 	  /* speculatively enqueue b0 to the current next frame */
 	  bi0 = from[0];
@@ -226,6 +230,18 @@ VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  n_left_to_next -= 1;
 
 	  b0 = vlib_get_buffer (vm, bi0);
+	  dh0 = vlib_buffer_get_current (b0);
+	  ASSERT(dh0->metadata_type == DASH_METADATA_PIPELINE2APP);
+
+	  dash_flow_entry_t* flow0 = dash_flow_alloc();
+	  flow0->key  = dh0->p2a.flow_key;
+	  flow0->data = dh0->p2a.flow_data;
+	  dash_flow_table_t *flow_table = dash_flow_table_get();
+	  dash_flow_table_add_entry (flow_table, flow0);
+	  flow0->timer_handle = TW (tw_timer_start) (&flow_table->flow_tw, flow0->index, 0, flow0->timeout);
+
+
+	  vlib_buffer_advance (b0, -sizeof(ethernet_header_t));
 	  /*
 	   * Direct from the driver, we should be at offset 0
 	   * aka at &b0->data[0]
@@ -235,13 +251,10 @@ VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  en0 = vlib_buffer_get_current (b0);
 
 	  /* This is not the fastest way to swap src + dst mac addresses */
-#define _(a) tmp0[a] = en0->src_address[a];
+#define _(a) en0->src_address[a] = 0x07;
 	  foreach_mac_address_offset;
 #undef _
-#define _(a) en0->src_address[a] = en0->dst_address[a];
-	  foreach_mac_address_offset;
-#undef _
-#define _(a) en0->dst_address[a] = tmp0[a];
+#define _(a) en0->dst_address[a] = 0x02;
 	  foreach_mac_address_offset;
 #undef _
 
@@ -277,421 +290,11 @@ VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 			       DASH_ERROR_SWAPPED, pkts_swapped);
   return frame->n_vectors;
 }
-#endif
-
-/*
- * This version swaps mac addresses using an MMX vector shuffle
- * Node costs about 17 clocks/pkt at a vector size of 26
- */
-#ifdef VERSION_2
-VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
-			    vlib_frame_t * frame)
-{
-  u32 n_left_from, *from, *to_next;
-  dash_next_t next_index;
-  u32 pkts_swapped = 0;
-  /* Vector shuffle mask to swap src, dst */
-
-  from = vlib_frame_vector_args (frame);
-  n_left_from = frame->n_vectors;
-  next_index = node->cached_next_index;
-
-  while (n_left_from > 0)
-    {
-      u32 n_left_to_next;
-
-      vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
-      while (n_left_from >= 4 && n_left_to_next >= 2)
-	{
-	  u32 next0 = DASH_NEXT_INTERFACE_OUTPUT;
-	  u32 next1 = DASH_NEXT_INTERFACE_OUTPUT;
-	  u32 sw_if_index0, sw_if_index1;
-	  u8x16 src_dst0, src_dst1;
-	  ethernet_header_t *en0, *en1;
-	  u32 bi0, bi1;
-	  vlib_buffer_t *b0, *b1;
-
-	  /* Prefetch next iteration. */
-	  {
-	    vlib_buffer_t *p2, *p3;
-
-	    p2 = vlib_get_buffer (vm, from[2]);
-	    p3 = vlib_get_buffer (vm, from[3]);
-
-	    vlib_prefetch_buffer_header (p2, LOAD);
-	    vlib_prefetch_buffer_header (p3, LOAD);
-
-	    clib_prefetch_store (p2->data);
-	    clib_prefetch_store (p3->data);
-	  }
-
-	  /* speculatively enqueue b0 and b1 to the current next frame */
-	  to_next[0] = bi0 = from[0];
-	  to_next[1] = bi1 = from[1];
-	  from += 2;
-	  to_next += 2;
-	  n_left_from -= 2;
-	  n_left_to_next -= 2;
-
-	  b0 = vlib_get_buffer (vm, bi0);
-	  b1 = vlib_get_buffer (vm, bi1);
-
-	  ASSERT (b0->current_data == 0);
-	  ASSERT (b1->current_data == 0);
-
-	  en0 = vlib_buffer_get_current (b0);
-	  en1 = vlib_buffer_get_current (b1);
-
-	  src_dst0 = ((u8x16 *) en0)[0];
-	  src_dst1 = ((u8x16 *) en1)[0];
-	  src_dst0 = u8x16_shuffle (src_dst0, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3,
-				    4, 5, 12, 13, 14, 15);
-	  src_dst1 = u8x16_shuffle (src_dst1, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3,
-				    4, 5, 12, 13, 14, 15);
-	  ((u8x16 *) en0)[0] = src_dst0;
-	  ((u8x16 *) en1)[0] = src_dst1;
-
-	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
-	  sw_if_index1 = vnet_buffer (b1)->sw_if_index[VLIB_RX];
-
-	  /* Send pkt back out the RX interface */
-	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = sw_if_index0;
-	  vnet_buffer (b1)->sw_if_index[VLIB_TX] = sw_if_index1;
-
-	  pkts_swapped += 2;
-
-	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)))
-	    {
-	      if (b0->flags & VLIB_BUFFER_IS_TRACED)
-		{
-		  dash_trace_t *t =
-		    vlib_add_trace (vm, node, b0, sizeof (*t));
-		  t->sw_if_index = sw_if_index0;
-		  t->next_index = next0;
-		  clib_memcpy_fast (t->new_src_mac, en0->src_address,
-				    sizeof (t->new_src_mac));
-		  clib_memcpy_fast (t->new_dst_mac, en0->dst_address,
-				    sizeof (t->new_dst_mac));
-
-		}
-	      if (b1->flags & VLIB_BUFFER_IS_TRACED)
-		{
-		  dash_trace_t *t =
-		    vlib_add_trace (vm, node, b1, sizeof (*t));
-		  t->sw_if_index = sw_if_index1;
-		  t->next_index = next1;
-		  clib_memcpy_fast (t->new_src_mac, en1->src_address,
-				    sizeof (t->new_src_mac));
-		  clib_memcpy_fast (t->new_dst_mac, en1->dst_address,
-				    sizeof (t->new_dst_mac));
-		}
-	    }
-
-	  /* verify speculative enqueues, maybe switch current next frame */
-	  vlib_validate_buffer_enqueue_x2 (vm, node, next_index,
-					   to_next, n_left_to_next,
-					   bi0, bi1, next0, next1);
-	}
-
-      while (n_left_from > 0 && n_left_to_next > 0)
-	{
-	  u32 bi0;
-	  vlib_buffer_t *b0;
-	  u32 next0 = DASH_NEXT_INTERFACE_OUTPUT;
-	  u32 sw_if_index0;
-	  u8x16 src_dst0;
-	  ethernet_header_t *en0;
-
-	  /* speculatively enqueue b0 to the current next frame */
-	  bi0 = from[0];
-	  to_next[0] = bi0;
-	  from += 1;
-	  to_next += 1;
-	  n_left_from -= 1;
-	  n_left_to_next -= 1;
-
-	  b0 = vlib_get_buffer (vm, bi0);
-	  /*
-	   * Direct from the driver, we should be at offset 0
-	   * aka at &b0->data[0]
-	   */
-	  ASSERT (b0->current_data == 0);
-
-	  en0 = vlib_buffer_get_current (b0);
-	  src_dst0 = ((u8x16 *) en0)[0];
-	  src_dst0 = u8x16_shuffle (src_dst0, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3,
-				    4, 5, 12, 13, 14, 15);
-	  ((u8x16 *) en0)[0] = src_dst0;
-
-	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
-
-	  /* Send pkt back out the RX interface */
-	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = sw_if_index0;
-
-	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)
-			     && (b0->flags & VLIB_BUFFER_IS_TRACED)))
-	    {
-	      dash_trace_t *t = vlib_add_trace (vm, node, b0, sizeof (*t));
-	      t->sw_if_index = sw_if_index0;
-	      t->next_index = next0;
-	      clib_memcpy_fast (t->new_src_mac, en0->src_address,
-				sizeof (t->new_src_mac));
-	      clib_memcpy_fast (t->new_dst_mac, en0->dst_address,
-				sizeof (t->new_dst_mac));
-	    }
-
-	  pkts_swapped += 1;
-
-	  /* verify speculative enqueue, maybe switch current next frame */
-	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
-					   to_next, n_left_to_next,
-					   bi0, next0);
-	}
-
-      vlib_put_next_frame (vm, node, next_index, n_left_to_next);
-    }
-
-  vlib_node_increment_counter (vm, dash_node.index,
-			       DASH_ERROR_SWAPPED, pkts_swapped);
-  return frame->n_vectors;
-}
-#endif
-
-
-/*
- * This version computes all of the buffer pointers in
- * one motion, uses a quad/single loop model, and
- * traces the entire frame in one motion.
- *
- * Node costs about 16 clocks/pkt at a vector size of 26
- *
- * Some compilation drama with u8x16_shuffle, so turned off by
- * default.
- */
-
-#ifdef VERSION_3
-
-/* This would normally be a stack local, but since it's a constant... */
-static const u16 nexts[VLIB_FRAME_SIZE] = { 0 };
-
-VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
-			    vlib_frame_t * frame)
-{
-  u32 n_left_from, *from;
-  u32 pkts_swapped = 0;
-  /* Vector shuffle mask to swap src, dst */
-  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b;
-  /* See comment below about sending all pkts to the same place... */
-  u16 *next __attribute__ ((unused));
-
-  from = vlib_frame_vector_args (frame);
-  n_left_from = frame->n_vectors;
-
-  vlib_get_buffers (vm, from, bufs, n_left_from);
-  b = bufs;
-  // next = nexts;
-
-  /*
-   * We send all pkts to DASH_NEXT_INTERFACE_OUTPUT, aka
-   * graph arc 0. So the usual setting of next[0...3] is commented
-   * out below
-   */
-
-  while (n_left_from >= 4)
-    {
-      u8x16 src_dst0, src_dst1, src_dst2, src_dst3;
-      /* Prefetch next iteration. */
-      if (PREDICT_TRUE (n_left_from >= 8))
-	{
-	  vlib_prefetch_buffer_header (b[4], STORE);
-	  vlib_prefetch_buffer_header (b[5], STORE);
-	  vlib_prefetch_buffer_header (b[6], STORE);
-	  vlib_prefetch_buffer_header (b[7], STORE);
-	  clib_prefetch_store (&b[4]->data);
-	  clib_prefetch_store (&b[5]->data);
-	  clib_prefetch_store (&b[6]->data);
-	  clib_prefetch_store (&b[7]->data);
-	}
-
-      src_dst0 = ((u8x16 *) vlib_buffer_get_current (b[0]))[0];
-      src_dst1 = ((u8x16 *) vlib_buffer_get_current (b[1]))[0];
-      src_dst2 = ((u8x16 *) vlib_buffer_get_current (b[2]))[0];
-      src_dst3 = ((u8x16 *) vlib_buffer_get_current (b[3]))[0];
-
-      src_dst0 = u8x16_shuffle (src_dst0, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5,
-				12, 13, 14, 15);
-      src_dst1 = u8x16_shuffle (src_dst1, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5,
-				12, 13, 14, 15);
-      src_dst2 = u8x16_shuffle (src_dst2, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5,
-				12, 13, 14, 15);
-      src_dst3 = u8x16_shuffle (src_dst3, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5,
-				12, 13, 14, 15);
-
-      ((u8x16 *) vlib_buffer_get_current (b[0]))[0] = src_dst0;
-      ((u8x16 *) vlib_buffer_get_current (b[1]))[0] = src_dst1;
-      ((u8x16 *) vlib_buffer_get_current (b[2]))[0] = src_dst2;
-      ((u8x16 *) vlib_buffer_get_current (b[3]))[0] = src_dst3;
-
-      vnet_buffer (b[0])->sw_if_index[VLIB_TX] =
-	vnet_buffer (b[0])->sw_if_index[VLIB_RX];
-      vnet_buffer (b[1])->sw_if_index[VLIB_TX] =
-	vnet_buffer (b[1])->sw_if_index[VLIB_RX];
-      vnet_buffer (b[2])->sw_if_index[VLIB_TX] =
-	vnet_buffer (b[2])->sw_if_index[VLIB_RX];
-      vnet_buffer (b[3])->sw_if_index[VLIB_TX] =
-	vnet_buffer (b[3])->sw_if_index[VLIB_RX];
-
-      // next[0] = DASH_NEXT_INTERFACE_OUTPUT;
-      // next[1] = DASH_NEXT_INTERFACE_OUTPUT;
-      // next[2] = DASH_NEXT_INTERFACE_OUTPUT;
-      // next[3] = DASH_NEXT_INTERFACE_OUTPUT;
-
-      b += 4;
-      // next += 4;
-      n_left_from -= 4;
-      pkts_swapped += 4;
-    }
-
-  while (n_left_from > 0)
-    {
-      u8x16 src_dst0;
-      src_dst0 = ((u8x16 *) vlib_buffer_get_current (b[0]))[0];
-      src_dst0 = u8x16_shuffle (src_dst0, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5,
-				12, 13, 14, 15);
-      ((u8x16 *) vlib_buffer_get_current (b[0]))[0] = src_dst0;
-      vnet_buffer (b[0])->sw_if_index[VLIB_TX] =
-	vnet_buffer (b[0])->sw_if_index[VLIB_RX];
-      // next[0] = DASH_NEXT_INTERFACE_OUTPUT;
-
-      b += 1;
-      // next += 1;
-      n_left_from -= 1;
-      pkts_swapped += 1;
-
-    }
-  vlib_buffer_enqueue_to_next (vm, node, from, (u16 *) nexts,
-			       frame->n_vectors);
-
-  vlib_node_increment_counter (vm, dash_node.index,
-			       DASH_ERROR_SWAPPED, pkts_swapped);
-
-  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)))
-    {
-      int i;
-      b = bufs;
-
-      for (i = 0; i < frame->n_vectors; i++)
-	{
-	  if (b[0]->flags & VLIB_BUFFER_IS_TRACED)
-	    {
-	      ethernet_header_t *en;
-	      dash_trace_t *t =
-		vlib_add_trace (vm, node, b[0], sizeof (*t));
-	      t->sw_if_index = vnet_buffer (b[0])->sw_if_index[VLIB_TX];
-	      t->next_index = DASH_NEXT_INTERFACE_OUTPUT;
-	      en = vlib_buffer_get_current (b[0]);
-	      clib_memcpy_fast (t->new_src_mac, en->src_address,
-				sizeof (t->new_src_mac));
-	      clib_memcpy_fast (t->new_dst_mac, en->dst_address,
-				sizeof (t->new_dst_mac));
-	      b++;
-	    }
-	  else
-	    break;
-	}
-    }
-  return frame->n_vectors;
-}
-#endif
-
-/*
- * This version computes all of the buffer pointers in
- * one motion, uses a fully pipelined loop model, and
- * traces the entire frame in one motion.
- *
- * It's performance-competative with other coding paradigms,
- * and it's the simplest way to write performant vpp code
- */
-
-
-#ifdef VERSION_4
-
-/* Final stage in the pipeline, do the mac swap */
-static inline u32
-last_stage (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_buffer_t * b)
-{
-  u8x16 src_dst0;
-  src_dst0 = ((u8x16 *) vlib_buffer_get_current (b))[0];
-  src_dst0 = u8x16_shuffle (src_dst0, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 12,
-			    13, 14, 15);
-  ((u8x16 *) vlib_buffer_get_current (b))[0] = src_dst0;
-  vnet_buffer (b)->sw_if_index[VLIB_TX] =
-    vnet_buffer (b)->sw_if_index[VLIB_RX];
-  /* set next-index[] to 0 for this buffer */
-  return 0;
-}
-
-/*
- * Add a couple of nil stages to increase the prefetch stride.
- * For any specific platform, the optimal prefetch stride may differ.
- */
-static inline void
-stage1 (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_buffer_t * b)
-{
-}
-
-static inline void
-stage2 (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_buffer_t * b)
-{
-}
-
-#define NSTAGES 4
-#define STAGE_INLINE inline __attribute__((__always_inline__))
-
-#define stage0 generic_stage0
-
-#include <vnet/pipeline.h>
-
-VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
-			    vlib_frame_t * frame)
-{
-  dispatch_pipeline (vm, node, frame);
-
-  vlib_node_increment_counter (vm, dash_node.index,
-			       DASH_ERROR_SWAPPED, frame->n_vectors);
-  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)))
-    {
-      int i;
-      b = bufs;
-
-      for (i = 0; i < frame->n_vectors; i++)
-	{
-	  if (b[0]->flags & VLIB_BUFFER_IS_TRACED)
-	    {
-	      ethernet_header_t *en;
-	      dash_trace_t *t =
-		vlib_add_trace (vm, node, b[0], sizeof (*t));
-	      t->sw_if_index = vnet_buffer (b[0])->sw_if_index[VLIB_TX];
-	      t->next_index = DASH_NEXT_INTERFACE_OUTPUT;
-	      en = vlib_buffer_get_current (b[0]);
-	      clib_memcpy_fast (t->new_src_mac, en->src_address,
-				sizeof (t->new_src_mac));
-	      clib_memcpy_fast (t->new_dst_mac, en->dst_address,
-				sizeof (t->new_dst_mac));
-	      b++;
-	    }
-	  else
-	    break;
-	}
-    }
-  return frame->n_vectors;
-}
-#endif
 
 /* *INDENT-OFF* */
 VLIB_REGISTER_NODE (dash_node) =
 {
-  .name = "dash",
+  .name = "dash-pipeline-input",
   .vector_size = sizeof (u32),
   .format_trace = format_dash_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,

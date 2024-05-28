@@ -23,12 +23,17 @@
 #include <vppinfra/error.h>
 #include <vppinfra/elog.h>
 
+#include <dash/flow.h>
+
 typedef struct {
     /* API message ID base */
     u16 msg_id_base;
 
     /* convenience */
     vnet_main_t * vnet_main;
+
+    /* dash pipeline arc index */
+    u8 feature_arc_index;
 } dash_main_t;
 
 extern dash_main_t dash_main;

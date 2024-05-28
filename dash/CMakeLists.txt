@@ -20,6 +20,7 @@ add_vpp_plugin(dash
   SOURCES
   node.c
   dash.c
+  flow.c
 
   MULTIARCH_SOURCES
   node.c

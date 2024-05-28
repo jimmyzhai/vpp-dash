@@ -40,12 +40,12 @@ typedef struct {
 
 dash_test_main_t dash_test_main;
 
-static int api_dash_macswap_enable_disable (vat_main_t * vam)
+static int api_dash_enable_disable (vat_main_t * vam)
 {
     unformat_input_t * i = vam->input;
     int enable_disable = 1;
     u32 sw_if_index = ~0;
-    vl_api_dash_macswap_enable_disable_t * mp;
+    vl_api_dash_enable_disable_t * mp;
     int ret;
 
     /* Parse args required to build the message */
@@ -66,7 +66,7 @@ static int api_dash_macswap_enable_disable (vat_main_t * vam)
     }
 
     /* Construct the API message */
-    M(DASH_MACSWAP_ENABLE_DISABLE, mp);
+    M(DASH_ENABLE_DISABLE, mp);
     mp->sw_if_index = ntohl (sw_if_index);
     mp->enable_disable = enable_disable;
 

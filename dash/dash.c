@@ -40,19 +40,19 @@ VLIB_PLUGIN_REGISTER () = {
 dash_main_t dash_main;
 
 /**
- * @brief Enable/disable the macswap plugin. 
+ * @brief Enable/disable the dash plugin.
  *
  * Action function shared between message handler and debug CLI.
  */
 
-int dash_macswap_enable_disable (dash_main_t * sm, u32 sw_if_index,
-                                   int enable_disable)
+int dash_enable_disable (dash_main_t * sm, u32 sw_if_index,
+                         int enable_disable)
 {
   vnet_sw_interface_t * sw;
   int rv = 0;
 
   /* Utterly wrong? */
-  if (pool_is_free_index (sm->vnet_main->interface_main.sw_interfaces, 
+  if (pool_is_free_index (sm->vnet_main->interface_main.sw_interfaces,
                           sw_if_index))
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
@@ -60,22 +60,21 @@ int dash_macswap_enable_disable (dash_main_t * sm, u32 sw_if_index,
   sw = vnet_get_sw_interface (sm->vnet_main, sw_if_index);
   if (sw->type != VNET_SW_INTERFACE_TYPE_HARDWARE)
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
-  
-  vnet_feature_enable_disable ("device-input", "dash",
+
+  vnet_feature_enable_disable ("dash-pipeline", "dash-pipeline-input",
                                sw_if_index, enable_disable, 0, 0);
 
   return rv;
 }
 
 static clib_error_t *
-macswap_enable_disable_command_fn (vlib_main_t * vm,
-                                   unformat_input_t * input,
-                                   vlib_cli_command_t * cmd)
+dash_cmd_set_enable_disable_fn (vlib_main_t * vm,
+                                unformat_input_t * input,
+                                vlib_cli_command_t * cmd)
 {
   dash_main_t * sm = &dash_main;
   u32 sw_if_index = ~0;
   int enable_disable = 1;
-    
   int rv;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT) {
@@ -90,15 +89,15 @@ macswap_enable_disable_command_fn (vlib_main_t * vm,
 
   if (sw_if_index == ~0)
     return clib_error_return (0, "Please specify an interface...");
-    
-  rv = dash_macswap_enable_disable (sm, sw_if_index, enable_disable);
+
+  rv = dash_enable_disable (sm, sw_if_index, enable_disable);
 
   switch(rv) {
   case 0:
     break;
 
   case VNET_API_ERROR_INVALID_SW_IF_INDEX:
-    return clib_error_return 
+    return clib_error_return
       (0, "Invalid interface, only works on physical ports");
     break;
 
@@ -107,36 +106,36 @@ macswap_enable_disable_command_fn (vlib_main_t * vm,
     break;
 
   default:
-    return clib_error_return (0, "dash_macswap_enable_disable returned %d",
+    return clib_error_return (0, "dash_enable_disable returned %d",
                               rv);
   }
   return 0;
 }
 
 /**
- * @brief CLI command to enable/disable the dash macswap plugin.
+ * @brief CLI command to enable/disable the dash plugin.
  */
-VLIB_CLI_COMMAND (sr_content_command, static) = {
-    .path = "dash macswap",
-    .short_help = 
-    "dash macswap <interface-name> [disable]",
-    .function = macswap_enable_disable_command_fn,
+VLIB_CLI_COMMAND (dash_set_command, static) = {
+    .path = "set dash",
+    .short_help =
+    "set dash <interface-name> [disable]",
+    .function = dash_cmd_set_enable_disable_fn,
 };
 
 /**
  * @brief Plugin API message handler.
  */
-static void vl_api_dash_macswap_enable_disable_t_handler
-(vl_api_dash_macswap_enable_disable_t * mp)
+static void vl_api_dash_enable_disable_t_handler
+(vl_api_dash_enable_disable_t * mp)
 {
-  vl_api_dash_macswap_enable_disable_reply_t * rmp;
+  vl_api_dash_enable_disable_reply_t * rmp;
   dash_main_t * sm = &dash_main;
   int rv;
 
-  rv = dash_macswap_enable_disable (sm, ntohl(mp->sw_if_index), 
-                                      (int) (mp->enable_disable));
-  
-  REPLY_MACRO(VL_API_DASH_MACSWAP_ENABLE_DISABLE_REPLY);
+  rv = dash_enable_disable (sm, ntohl(mp->sw_if_index),
+                            (int) (mp->enable_disable));
+
+  REPLY_MACRO(VL_API_DASH_ENABLE_DISABLE_REPLY);
 }
 
 /* API definitions */
@@ -154,6 +153,11 @@ static clib_error_t * dash_init (vlib_main_t * vm)
   /* Add our API messages to the global name_crc hash table */
   sm->msg_id_base = setup_message_id_table ();
 
+  /* Reuse SECURE_DATA (0x876D) for dash metadata */
+  ethernet_register_input_type (vm, ETHERNET_TYPE_SECURE_DATA, dash_node.index);
+
+  dash_flow_table_init(dash_flow_table_get());
+
   return 0;
 }
 
@@ -162,9 +166,41 @@ VLIB_INIT_FUNCTION (dash_init);
 /**
  * @brief Hook the dash plugin into the VPP graph hierarchy.
  */
-VNET_FEATURE_INIT (dash, static) = 
+VNET_FEATURE_ARC_INIT (dash_pipeline, static) =
 {
-  .arc_name = "device-input",
-  .node_name = "dash",
-  .runs_before = VNET_FEATURES ("ethernet-input"),
+  .arc_name = "dash-pipeline",
+  .start_nodes = VNET_FEATURES ("dash-pipeline-input"),
+  .last_in_arc = "error-drop",
+  .arc_index_ptr = &dash_main.feature_arc_index,
 };
+
+static uword
+dash_timer_process (vlib_main_t * vm, vlib_node_runtime_t * rt, vlib_frame_t * f)
+{
+
+  int i;
+  f64 sleep_duration = 1.0;
+
+  unix_sleep (5.0); /* FIXME: delay 5s */
+
+  while (1)
+  {
+      /* FIXME: Use time-wheel per-worker thread later */
+      //for (i = 1; i < vlib_get_n_threads(); i++) {
+          vlib_node_set_interrupt_pending (vlib_get_main_by_index(1),
+            dash_flow_scan_node.index);
+      //}
+
+      vlib_process_suspend (vm, sleep_duration);
+  }
+  return 0;
+}
+
+/* *INDENT-OFF* */
+VLIB_REGISTER_NODE (dash_timer_node,static) = {
+  .function = dash_timer_process,
+  .name = "dash-timer-process",
+  .type = VLIB_NODE_TYPE_PROCESS,
+};
+/* *INDENT-ON* */
+
