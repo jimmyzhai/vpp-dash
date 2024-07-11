@@ -1,4 +1,7 @@
 
+#include <arpa/inet.h>
+
+#include <dash/dash.h>
 #include <dash/flow.h>
 
 #define DASH_FLOW_NUM (1 << 20) /* 1M */
@@ -45,6 +48,115 @@ dash_flow_get_by_index (u32 index)
     return flow;
 }
 
+static int
+dash_flow_create (dash_flow_table_t *flow_table, const dash_header_t *dh)
+{
+    int r;
+    sai_status_t status;
+
+    ASSERT(flow_table && dh);
+
+    u16 length = ntohs(dh->packet_meta.length);
+    ASSERT(length >= offsetof(dash_header_t, flow_data));
+
+    dash_flow_entry_t* flow = dash_flow_alloc();
+
+    flow->key.eni = 0;
+    flow->key.proto = dh->flow_key.ip_proto;
+    flow->key.src_addr = dh->flow_key.src_ip.ip4;
+    flow->key.dst_addr = dh->flow_key.dst_ip.ip4;
+    flow->key.src_port = dh->flow_key.src_port;
+    flow->key.dst_port = dh->flow_key.dst_port;
+
+    flow->data.version = dh->flow_data.version;
+    flow->data.direction = dh->flow_data.direction;
+    flow->data.actions = dh->flow_data.routing_actions;
+
+    r = dash_flow_table_add_entry (flow_table, flow);
+    if (r != 0) goto table_add_entry_fail;
+
+    status = dash_sai_create_flow_entry(dh);
+    if (status != SAI_STATUS_SUCCESS) goto sai_create_flow_fail;
+
+    flow_table->flow_stats.create_ok++;
+    flow->timer_handle = TW (tw_timer_start) (&flow_table->flow_tw, flow->index, 0, flow->timeout);
+    return 0;
+
+sai_create_flow_fail:
+    flow_table->flow_stats.create_fail++;
+    dash_flow_table_delete_entry (flow_table, flow);
+    dash_flow_free(flow);
+    return -1;
+
+table_add_entry_fail:
+    return r;
+}
+
+static int
+dash_flow_update (dash_flow_table_t *flow_table, const dash_header_t *dh)
+{
+    return -1; /* TODO later */
+}
+
+static int
+dash_flow_remove (dash_flow_table_t *flow_table, const dash_header_t *dh)
+{
+    int r = -1;
+    sai_status_t status;
+    dash_flow_key_t key;
+    dash_flow_entry_t* flow;
+
+    ASSERT(flow_table && dh);
+
+    u16 length = ntohs(dh->packet_meta.length);
+    ASSERT(length >= offsetof(dash_header_t, flow_key));
+
+    key.eni = 0;
+    key.proto = dh->flow_key.ip_proto;
+    key.src_addr = dh->flow_key.src_ip.ip4;
+    key.dst_addr = dh->flow_key.dst_ip.ip4;
+    key.src_port = dh->flow_key.src_port;
+    key.dst_port = dh->flow_key.dst_port;
+
+    flow = dash_flow_table_lookup_entry(flow_table, &key);
+    if (!flow) goto flow_not_found;
+
+    status = dash_sai_remove_flow_entry(dh);
+    if (status != SAI_STATUS_SUCCESS) goto sai_remove_flow_fail;
+
+    r = dash_flow_table_delete_entry (flow_table, flow);
+    ASSERT(r == 0);
+    dash_flow_free(flow);
+
+    flow_table->flow_stats.remove_ok++;
+    return 0;
+
+sai_remove_flow_fail:
+    flow_table->flow_stats.remove_fail++;
+
+flow_not_found:
+    return -1;
+}
+
+typedef int (*dash_flow_cmd_handler) (dash_flow_table_t *flow_table, const dash_header_t *dh);
+
+static dash_flow_cmd_handler  flow_cmd_funs[] = {
+    [1] = dash_flow_create,
+    [2] = dash_flow_update,
+    [3] = dash_flow_remove,
+};
+
+
+int
+dash_flow_process (dash_flow_table_t *flow_table, const dash_header_t *dh)
+{
+    ASSERT(dh->packet_meta.packet_type == 0);
+    ASSERT(dh->packet_meta.packet_subtype > 0);
+    ASSERT(dh->packet_meta.packet_subtype < 4);
+
+    return flow_cmd_funs[dh->packet_meta.packet_subtype](flow_table, dh);
+}
+
 static void
 dash_flow_expired_timer_callback (u32 * expired_timers)
 {
@@ -69,6 +181,8 @@ dash_flow_table_init (dash_flow_table_t *flow_table)
         DASH_FLOW_NUM_BUCKETS, DASH_FLOW_MEMORY_SIZE);
 
     pool_init_fixed (flow_table->flow_pool, DASH_FLOW_NUM);
+
+    bzero(&flow_table->flow_stats, sizeof(flow_table->flow_stats));
 
     TW (tw_timer_wheel_init) (&flow_table->flow_tw,
                               dash_flow_expired_timer_callback,
@@ -213,3 +327,30 @@ VLIB_CLI_COMMAND (dash_clear_flow_command, static) = {
     .short_help = "clear dash flow <index>",
     .function = dash_cmd_clear_flow_fn,
 };
+
+
+static clib_error_t *
+dash_cmd_show_flow_stats_fn (vlib_main_t * vm,
+               unformat_input_t * input, vlib_cli_command_t * cmd)
+{
+  clib_error_t *error = 0;
+  dash_flow_table_t *flow_table = dash_flow_table_get();
+
+  vlib_cli_output (vm, "%10s: %u", "create_ok",
+                   flow_table->flow_stats.create_ok);
+  vlib_cli_output (vm, "%10s: %u", "create_fail",
+                   flow_table->flow_stats.create_fail);
+  vlib_cli_output (vm, "%10s: %u", "remove_ok",
+                   flow_table->flow_stats.remove_ok);
+  vlib_cli_output (vm, "%10s: %u", "remove_fail",
+                   flow_table->flow_stats.remove_fail);
+
+  return error;
+}
+
+VLIB_CLI_COMMAND (dash_show_flow_stats_command, static) = {
+    .path = "show dash flow stats",
+    .short_help = "show dash flow [src-addr IP]",
+    .function = dash_cmd_show_flow_stats_fn,
+};
+

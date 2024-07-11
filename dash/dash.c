@@ -37,6 +37,10 @@ VLIB_PLUGIN_REGISTER () = {
 };
 /* *INDENT-ON* */
 
+VLIB_REGISTER_LOG_CLASS (dash_log) = {
+  .class_name = "dash",
+};
+
 dash_main_t dash_main;
 
 /**
@@ -157,6 +161,8 @@ static clib_error_t * dash_init (vlib_main_t * vm)
   ethernet_register_input_type (vm, ETHERNET_TYPE_SECURE_DATA, dash_node.index);
 
   dash_flow_table_init(dash_flow_table_get());
+
+  dash_sai_init();
 
   return 0;
 }

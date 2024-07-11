@@ -21,6 +21,7 @@ add_vpp_plugin(dash
   node.c
   dash.c
   flow.c
+  saiapi.c
 
   MULTIARCH_SOURCES
   node.c

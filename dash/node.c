@@ -12,6 +12,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <arpa/inet.h>
+
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
 #include <vnet/pg/pg.h>
@@ -133,41 +135,58 @@ VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 
 	  dh0 = vlib_buffer_get_current (b0);
 	  dh1 = vlib_buffer_get_current (b1);
-	  ASSERT(dh0->metadata_type == DASH_METADATA_PIPELINE2APP);
-	  ASSERT(dh1->metadata_type == DASH_METADATA_PIPELINE2APP);
-
-	  dash_flow_entry_t* flow0 = dash_flow_alloc();
-	  dash_flow_entry_t* flow1 = dash_flow_alloc();
-
-	  flow0->key  = dh0->p2a.flow_key;
-	  flow0->data = dh0->p2a.flow_data;
-	  flow1->key  = dh1->p2a.flow_key;
-	  flow1->data = dh1->p2a.flow_data;
-
 	  dash_flow_table_t *flow_table = dash_flow_table_get();
-	  dash_flow_table_add_entry (flow_table, flow0);
-	  flow0->timer_handle = TW (tw_timer_start) (&flow_table->flow_tw, flow0->index, 0, flow0->timeout);
-	  dash_flow_table_add_entry (flow_table, flow1);
-	  flow1->timer_handle = TW (tw_timer_start) (&flow_table->flow_tw, flow1->index, 0, flow1->timeout);
+	  if (dash_flow_process(flow_table, dh0) != 0) {
+	      /* FIXME */
+	  }
+	  if (dash_flow_process(flow_table, dh1) != 0) {
+	      /* FIXME */
+	  }
 
-	  vlib_buffer_advance (b0, -sizeof(ethernet_header_t));
-	  vlib_buffer_advance (b1, -sizeof(ethernet_header_t));
-	  en0 = vlib_buffer_get_current (b0);
-	  en1 = vlib_buffer_get_current (b1);
+	  /*
+	   * Build new packet
+	   */
 
-	  /* FIXME */
-#define _(a) en0->src_address[a] = 0x07;
+	  /* Update ethernet header via swap src and dst mac */
+	  en0 = (ethernet_header_t*)dh0 - 1;
+#define _(a) tmp0[a] = en0->src_address[a];
 	  foreach_mac_address_offset;
 #undef _
-#define _(a) en0->dst_address[a] = 0x02;
+#define _(a) en0->src_address[a] = en0->dst_address[a];
 	  foreach_mac_address_offset;
 #undef _
-#define _(a) en1->src_address[a] = 0x07;
+#define _(a) en0->dst_address[a] = tmp0[a];
 	  foreach_mac_address_offset;
 #undef _
-#define _(a) en1->dst_address[a] = 0x02;
+
+	  en1 = (ethernet_header_t*)dh1 - 1;
+#define _(a) tmp1[a] = en1->src_address[a];
 	  foreach_mac_address_offset;
 #undef _
+#define _(a) en1->src_address[a] = en1->dst_address[a];
+	  foreach_mac_address_offset;
+#undef _
+#define _(a) en1->dst_address[a] = tmp1[a];
+	  foreach_mac_address_offset;
+#undef _
+
+	  /* Update dash header */
+	  dh0->packet_meta.packet_source = DPAPP;
+	  dh1->packet_meta.packet_source = DPAPP;
+	  /* Only keep packet_meta and flow_key in dash_header_t */
+	  u16 length0 = ntohs(dh0->packet_meta.length);
+	  u16 length1 = ntohs(dh1->packet_meta.length);
+	  dh0->packet_meta.length = htons(offsetof(dash_header_t, flow_data));
+	  dh1->packet_meta.length = htons(offsetof(dash_header_t, flow_data));
+	  /* Move customer packet after dash header */
+	  clib_memmove((u8*)&dh0->flow_data, (u8*)dh0 + length0, vlib_buffer_get_tail(b0) - (u8*)dh0 - length0);
+	  clib_memmove((u8*)&dh1->flow_data, (u8*)dh1 + length1, vlib_buffer_get_tail(b1) - (u8*)dh1 - length1);
+
+	  vlib_buffer_reset (b0);
+	  vlib_buffer_reset (b1);
+	  b0->current_length -= length0 - offsetof(dash_header_t, flow_data);
+	  b1->current_length -= length1 - offsetof(dash_header_t, flow_data);
+
 
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 	  sw_if_index1 = vnet_buffer (b1)->sw_if_index[VLIB_RX];
@@ -231,32 +250,37 @@ VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 
 	  b0 = vlib_get_buffer (vm, bi0);
 	  dh0 = vlib_buffer_get_current (b0);
-	  ASSERT(dh0->metadata_type == DASH_METADATA_PIPELINE2APP);
-
-	  dash_flow_entry_t* flow0 = dash_flow_alloc();
-	  flow0->key  = dh0->p2a.flow_key;
-	  flow0->data = dh0->p2a.flow_data;
 	  dash_flow_table_t *flow_table = dash_flow_table_get();
-	  dash_flow_table_add_entry (flow_table, flow0);
-	  flow0->timer_handle = TW (tw_timer_start) (&flow_table->flow_tw, flow0->index, 0, flow0->timeout);
+	  if (dash_flow_process(flow_table, dh0) != 0) {
+	      /* FIXME */
+	  }
 
-
-	  vlib_buffer_advance (b0, -sizeof(ethernet_header_t));
 	  /*
-	   * Direct from the driver, we should be at offset 0
-	   * aka at &b0->data[0]
+	   * Build new packet
 	   */
-	  ASSERT (b0->current_data == 0);
 
-	  en0 = vlib_buffer_get_current (b0);
-
-	  /* This is not the fastest way to swap src + dst mac addresses */
-#define _(a) en0->src_address[a] = 0x07;
+	  /* Update ethernet header via swap src and dst mac */
+	  en0 = (ethernet_header_t*)dh0 - 1;
+#define _(a) tmp0[a] = en0->src_address[a];
 	  foreach_mac_address_offset;
 #undef _
-#define _(a) en0->dst_address[a] = 0x02;
+#define _(a) en0->src_address[a] = en0->dst_address[a];
 	  foreach_mac_address_offset;
 #undef _
+#define _(a) en0->dst_address[a] = tmp0[a];
+	  foreach_mac_address_offset;
+#undef _
+
+	  /* Update dash header */
+	  dh0->packet_meta.packet_source = DPAPP;
+	  /* Only keep packet_meta and flow_key in dash_header_t */
+	  u16 length0 = ntohs(dh0->packet_meta.length);
+	  dh0->packet_meta.length = htons(offsetof(dash_header_t, flow_data));
+	  /* Move customer packet after dash header */
+	  clib_memmove((u8*)&dh0->flow_data, (u8*)dh0 + length0, vlib_buffer_get_tail(b0) - (u8*)dh0 - length0);
+
+	  vlib_buffer_reset (b0);
+	  b0->current_length -= length0 - offsetof(dash_header_t, flow_data);
 
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
