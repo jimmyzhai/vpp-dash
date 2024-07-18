@@ -57,25 +57,40 @@ dash_flow_create (dash_flow_table_t *flow_table, const dash_header_t *dh)
     ASSERT(flow_table && dh);
 
     u16 length = ntohs(dh->packet_meta.length);
-    ASSERT(length >= offsetof(dash_header_t, flow_data));
+    ASSERT_MSG(length >= offsetof(dash_header_t, flow_overlay_data), "dash header not enough");
 
     dash_flow_entry_t* flow = dash_flow_alloc();
 
-    flow->key.eni = 0;
-    flow->key.proto = dh->flow_key.ip_proto;
-    flow->key.src_addr = dh->flow_key.src_ip.ip4;
-    flow->key.dst_addr = dh->flow_key.dst_ip.ip4;
-    flow->key.src_port = dh->flow_key.src_port;
-    flow->key.dst_port = dh->flow_key.dst_port;
+    clib_memcpy_fast(&flow->key, &dh->flow_key, sizeof(dh->flow_key));
 
-    flow->data.version = dh->flow_data.version;
-    flow->data.direction = dh->flow_data.direction;
-    flow->data.actions = dh->flow_data.routing_actions;
+    clib_memcpy_fast(&flow->flow_data, &dh->flow_data, sizeof(dh->flow_data));
+
+    /* FIXME
+     * Assume overlay_data, encap_data, tunnel_data in order if exists
+     * Need to add their offset in generic.
+     */
+    if (flow->flow_data.routing_actions != 0) {
+        ASSERT_MSG(length >= offsetof(dash_header_t, flow_encap_data),
+                "dash header not enough");
+        clib_memcpy_fast(&flow->flow_overlay_data, &dh->flow_overlay_data, sizeof(dh->flow_overlay_data));
+    }
+
+    if (flow->flow_data.routing_actions & htonl(SAI_DASH_ROUTING_ACTIONS_STATIC_ENCAP)) {
+        ASSERT_MSG(length >= offsetof(dash_header_t, flow_tunnel_data),
+                "dash header not enough");
+        clib_memcpy_fast(&flow->flow_encap_data, &dh->flow_encap_data, sizeof(dh->flow_encap_data));
+    }
+
+    if (flow->flow_data.tunnel_id != 0) {
+        ASSERT_MSG((u8*)(&dh->flow_tunnel_data + 1) <= (u8*)dh + length,
+                "dash header not enough");
+        clib_memcpy_fast(&flow->flow_tunnel_data, &dh->flow_tunnel_data, sizeof(dh->flow_tunnel_data));
+    }
 
     r = dash_flow_table_add_entry (flow_table, flow);
     if (r != 0) goto table_add_entry_fail;
 
-    status = dash_sai_create_flow_entry(dh);
+    status = dash_sai_create_flow_entry(flow);
     if (status != SAI_STATUS_SUCCESS) goto sai_create_flow_fail;
 
     flow_table->flow_stats.create_ok++;
@@ -89,6 +104,7 @@ sai_create_flow_fail:
     return -1;
 
 table_add_entry_fail:
+    dash_flow_free(flow);
     return r;
 }
 
@@ -103,7 +119,7 @@ dash_flow_remove (dash_flow_table_t *flow_table, const dash_header_t *dh)
 {
     int r = -1;
     sai_status_t status;
-    dash_flow_key_t key;
+    dash_flow_hash_key_t flow_hash_key;
     dash_flow_entry_t* flow;
 
     ASSERT(flow_table && dh);
@@ -111,18 +127,16 @@ dash_flow_remove (dash_flow_table_t *flow_table, const dash_header_t *dh)
     u16 length = ntohs(dh->packet_meta.length);
     ASSERT(length >= offsetof(dash_header_t, flow_key));
 
-    key.eni = 0;
-    key.proto = dh->flow_key.ip_proto;
-    key.src_addr = dh->flow_key.src_ip.ip4;
-    key.dst_addr = dh->flow_key.dst_ip.ip4;
-    key.src_port = dh->flow_key.src_port;
-    key.dst_port = dh->flow_key.dst_port;
+    bzero(&flow_hash_key, sizeof(flow_hash_key));
+    clib_memcpy_fast(&flow_hash_key, &dh->flow_key, sizeof(dh->flow_key));
 
-    flow = dash_flow_table_lookup_entry(flow_table, &key);
+    flow = dash_flow_table_lookup_entry(flow_table, &flow_hash_key.key);
     if (!flow) goto flow_not_found;
 
-    status = dash_sai_remove_flow_entry(dh);
+    status = dash_sai_remove_flow_entry(flow);
     if (status != SAI_STATUS_SUCCESS) goto sai_remove_flow_fail;
+
+    TW (tw_timer_stop) (&flow_table->flow_tw, flow->timer_handle);
 
     r = dash_flow_table_delete_entry (flow_table, flow);
     ASSERT(r == 0);
@@ -162,14 +176,23 @@ dash_flow_expired_timer_callback (u32 * expired_timers)
 {
   int i;
   u32 index;
+  sai_status_t status;
   dash_flow_table_t *flow_table = dash_flow_table_get();
 
   for (i = 0; i < vec_len (expired_timers); i++)
     {
       index = expired_timers[i] & 0x7FFFFFFF;
       dash_flow_entry_t *flow = dash_flow_get_by_index(index);
+      status = dash_sai_remove_flow_entry(flow);
+      if (status != SAI_STATUS_SUCCESS) {
+        dash_log_err("dash_sai_remove_flow_entry fail: %d", status);
+        continue;
+      }
+
       if (dash_flow_table_delete_entry (flow_table, flow) == 0) {
         dash_flow_free(flow);
+      } else {
+        ASSERT(0);
       }
     }
 }
@@ -195,7 +218,7 @@ dash_flow_table_add_entry (dash_flow_table_t *flow_table, dash_flow_entry_t *flo
     BVT (clib_bihash_kv) kv;
 
     clib_memcpy_fast (kv.key, &flow->key, sizeof(kv.key));
-    kv.value = (u64)(uintptr_t)&flow->data;
+    kv.value = (u64)(uintptr_t)&flow->flow_data;
     return BV (clib_bihash_add_del) (&flow_table->hash_table, &kv, 1 /* is_add */ );
 }
 
@@ -209,17 +232,17 @@ dash_flow_table_delete_entry (dash_flow_table_t *flow_table, dash_flow_entry_t *
 }
 
 dash_flow_entry_t*
-dash_flow_table_lookup_entry (dash_flow_table_t *flow_table, dash_flow_key_t *flow_key)
+dash_flow_table_lookup_entry (dash_flow_table_t *flow_table, flow_key_t *flow_key)
 {
     BVT (clib_bihash_kv) kv;
-    dash_flow_data_t *flow_data;
+    flow_data_t *flow_data;
 
     clib_memcpy_fast (kv.key, flow_key, sizeof(kv.key));
     if (BV (clib_bihash_search) (&flow_table->hash_table, &kv, &kv))
         return NULL;
 
-    flow_data = (dash_flow_data_t *)(uintptr_t)kv.value;
-    return (dash_flow_entry_t*)((u8*)flow_data - offsetof(dash_flow_entry_t, data));
+    flow_data = (flow_data_t *)(uintptr_t)kv.value;
+    return (dash_flow_entry_t*)((u8*)flow_data - offsetof(dash_flow_entry_t, flow_data));
 }
 
 static uword
@@ -243,18 +266,30 @@ dash_flow_format (u8 * s, va_list * args)
 {
   dash_flow_entry_t *flow = va_arg(*args, dash_flow_entry_t*);
 
-  s = format (s, "eni %d, proto %d, %U:%x -> %U:%x\n",
-              clib_net_to_host_u16 (flow->key.eni),
-              clib_net_to_host_u16 (flow->key.proto),
-              format_ip4_address, &flow->key.src_addr,
-              clib_net_to_host_u16 (flow->key.src_port),
-              format_ip4_address, &flow->key.dst_addr,
-              clib_net_to_host_u16 (flow->key.dst_port));
-  s = format (s, "        data - version %u, direction %u, actions %u",
-              clib_net_to_host_u32 (flow->data.version),
-              clib_net_to_host_u16 (flow->data.direction),
-              clib_net_to_host_u32 (flow->data.actions));
-  s = format (s, "        timeout %lu",
+  s = format (s, "eni %U, vnet_id %d, proto %d, ",
+              format_mac_address, flow->key.eni_mac,
+              clib_net_to_host_u16 (flow->key.vnet_id),
+              flow->key.ip_proto);
+
+  if (flow->key.is_ip_v6) {
+      s = format (s, "%U %d -> %U %d\n",
+                  format_ip6_address, &flow->key.src_ip.ip6,
+                  clib_net_to_host_u16 (flow->key.src_port),
+                  format_ip6_address, &flow->key.dst_ip.ip6,
+                  clib_net_to_host_u16 (flow->key.dst_port));
+  } else {
+      s = format (s, "%U %d -> %U %d\n",
+                  format_ip4_address, &flow->key.src_ip.ip4,
+                  clib_net_to_host_u16 (flow->key.src_port),
+                  format_ip4_address, &flow->key.dst_ip.ip4,
+                  clib_net_to_host_u16 (flow->key.dst_port));
+  }
+
+  s = format (s, "        common data - version %u, direction %u, actions %u",
+              clib_net_to_host_u32 (flow->flow_data.version),
+              clib_net_to_host_u16 (flow->flow_data.direction),
+              clib_net_to_host_u32 (flow->flow_data.routing_actions));
+  s = format (s, ", timeout %lu\n",
               flow->access_time + flow->timeout - (u64)unix_time_now());
 
   return s;
@@ -270,8 +305,9 @@ static int
 dash_flow_show_walk_cb (BVT (clib_bihash_kv) * kvp, void *arg)
 {
   dash_flow_show_walk_ctx_t *ctx = arg;
-  dash_flow_data_t *flow_data = (dash_flow_data_t *)(uintptr_t)kvp->value;
-  dash_flow_entry_t *flow = (dash_flow_entry_t*)((u8*)flow_data - offsetof(dash_flow_entry_t, data));
+  flow_data_t *flow_data = (flow_data_t *)(uintptr_t)kvp->value;
+  dash_flow_entry_t *flow = (dash_flow_entry_t*)((u8*)flow_data -
+          offsetof(dash_flow_entry_t, flow_data));
 
   vlib_cli_output (ctx->vm, "%6u: %U", flow->index, dash_flow_format, flow);
 }
@@ -314,8 +350,17 @@ dash_cmd_clear_flow_fn (vlib_main_t * vm,
 
 
   dash_flow_entry_t *flow = dash_flow_get_by_index(index);
+  sai_status_t status = dash_sai_remove_flow_entry(flow);
+  if (status != SAI_STATUS_SUCCESS) {
+    error = clib_error_return (0, "dash_sai_remove_flow_entry fail: %d", status);
+  }
+
+  TW (tw_timer_stop) (&flow_table->flow_tw, flow->timer_handle);
+
   if (dash_flow_table_delete_entry (flow_table, flow) == 0) {
     dash_flow_free(flow);
+  } else {
+    ASSERT(0);
   }
 
 done:

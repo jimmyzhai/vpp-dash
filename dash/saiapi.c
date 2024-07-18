@@ -32,19 +32,16 @@ dash_sai_init ()
 }
 
 sai_status_t
-dash_sai_create_flow_entry (const dash_header_t *dh)
+dash_sai_create_flow_entry (const dash_flow_entry_t *flow)
 {
     sai_flow_entry_t flow_entry;
     u32 count = 0;
     sai_attribute_t attrs[SAI_FLOW_ENTRY_ATTR_END];
-    const flow_key_t *flow_key = &dh->flow_key;
-    const flow_data_t *flow_data = &dh->flow_data;
-    const overlay_rewrite_data_t *flow_overlay_data = &dh->flow_overlay_data;
-    const encap_data_t *flow_encap_data = &dh->flow_encap_data;
-    const encap_data_t *flow_tunnel_data = &dh->flow_tunnel_data;
-
-    u16 dh_length = ntohs(dh->packet_meta.length);
-    ASSERT_MSG(dh_length >= offsetof(dash_header_t, flow_data), "dash header not enough");
+    const flow_key_t *flow_key = &flow->key;
+    const flow_data_t *flow_data = &flow->flow_data;
+    const overlay_rewrite_data_t *flow_overlay_data = &flow->flow_overlay_data;
+    const encap_data_t *flow_encap_data = &flow->flow_encap_data;
+    const encap_data_t *flow_tunnel_data = &flow->flow_tunnel_data;
 
     /*
      * Fill sai_flow_entry_t, sai_attribute_t, whose values need host order
@@ -90,7 +87,7 @@ dash_sai_create_flow_entry (const dash_header_t *dh)
     attrs[count++].value.u32 = ntohl(flow_data->meter_class);
 
     /* Attrs for overlay rewrite data */
-    if ((u8*)(flow_overlay_data + 1) <= (u8*)dh + dh_length) {
+    if (flow_data->routing_actions != 0) {
         attrs[count].id = SAI_FLOW_ENTRY_ATTR_OVERLAY_DATA_IS_IPV6;
         attrs[count++].value.booldata = flow_overlay_data->is_ipv6;
 
@@ -140,7 +137,7 @@ dash_sai_create_flow_entry (const dash_header_t *dh)
     }
 
     /* Attrs for encap data */
-    if ((u8*)(flow_encap_data + 1) <= (u8*)dh + dh_length) {
+    if (flow_data->routing_actions & htonl(SAI_DASH_ROUTING_ACTIONS_STATIC_ENCAP)) {
         attrs[count].id = SAI_FLOW_ENTRY_ATTR_ENCAP_DATA_VNI;
         attrs[count++].value.u32 = (flow_encap_data->vni_high << 16) | ntohs(flow_encap_data->vni_low);
 
@@ -176,7 +173,7 @@ dash_sai_create_flow_entry (const dash_header_t *dh)
     }
 
     /* Attrs for tunnel data */
-    if ((u8*)(flow_tunnel_data + 1) <= (u8*)dh + dh_length) {
+    if (flow_data->tunnel_id != 0) {
         attrs[count].id = SAI_FLOW_ENTRY_ATTR_TUNNEL_DATA_VNI;
         attrs[count++].value.u32 = (flow_tunnel_data->vni_high << 16) | ntohs(flow_tunnel_data->vni_low);
 
@@ -215,10 +212,10 @@ dash_sai_create_flow_entry (const dash_header_t *dh)
 }
 
 sai_status_t
-dash_sai_remove_flow_entry (const dash_header_t *dh)
+dash_sai_remove_flow_entry (const dash_flow_entry_t *flow)
 {
     sai_flow_entry_t flow_entry;
-    const flow_key_t *flow_key = &dh->flow_key;
+    const flow_key_t *flow_key = &flow->key;
 
     flow_entry.switch_id = dash_switch_id;
     clib_memcpy_fast(flow_entry.eni_mac, flow_key->eni_mac, sizeof(flow_entry.eni_mac));

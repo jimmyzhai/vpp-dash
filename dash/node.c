@@ -171,21 +171,29 @@ VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 #undef _
 
 	  /* Update dash header */
+
 	  dh0->packet_meta.packet_source = DPAPP;
+	  if (dh0->packet_meta.packet_subtype != FLOW_DELETE) {
+	    /* Only keep packet_meta and flow_key in dash_header_t */
+	    u16 length0 = ntohs(dh0->packet_meta.length);
+	    dh0->packet_meta.length = htons(offsetof(dash_header_t, flow_data));
+	    /* Move customer packet after dash header */
+	    clib_memmove((u8*)&dh0->flow_data, (u8*)dh0 + length0, vlib_buffer_get_tail(b0) - (u8*)dh0 - length0);
+	    b0->current_length -= length0 - offsetof(dash_header_t, flow_data);
+	  }
+
 	  dh1->packet_meta.packet_source = DPAPP;
-	  /* Only keep packet_meta and flow_key in dash_header_t */
-	  u16 length0 = ntohs(dh0->packet_meta.length);
-	  u16 length1 = ntohs(dh1->packet_meta.length);
-	  dh0->packet_meta.length = htons(offsetof(dash_header_t, flow_data));
-	  dh1->packet_meta.length = htons(offsetof(dash_header_t, flow_data));
-	  /* Move customer packet after dash header */
-	  clib_memmove((u8*)&dh0->flow_data, (u8*)dh0 + length0, vlib_buffer_get_tail(b0) - (u8*)dh0 - length0);
-	  clib_memmove((u8*)&dh1->flow_data, (u8*)dh1 + length1, vlib_buffer_get_tail(b1) - (u8*)dh1 - length1);
+	  if (dh1->packet_meta.packet_subtype != FLOW_DELETE) {
+	    /* Only keep packet_meta and flow_key in dash_header_t */
+	    u16 length1 = ntohs(dh1->packet_meta.length);
+	    dh1->packet_meta.length = htons(offsetof(dash_header_t, flow_data));
+	    /* Move customer packet after dash header */
+	    clib_memmove((u8*)&dh1->flow_data, (u8*)dh1 + length1, vlib_buffer_get_tail(b1) - (u8*)dh1 - length1);
+	    b1->current_length -= length1 - offsetof(dash_header_t, flow_data);
+	  }
 
 	  vlib_buffer_reset (b0);
 	  vlib_buffer_reset (b1);
-	  b0->current_length -= length0 - offsetof(dash_header_t, flow_data);
-	  b1->current_length -= length1 - offsetof(dash_header_t, flow_data);
 
 
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
@@ -273,14 +281,16 @@ VLIB_NODE_FN (dash_node) (vlib_main_t * vm, vlib_node_runtime_t * node,
 
 	  /* Update dash header */
 	  dh0->packet_meta.packet_source = DPAPP;
-	  /* Only keep packet_meta and flow_key in dash_header_t */
-	  u16 length0 = ntohs(dh0->packet_meta.length);
-	  dh0->packet_meta.length = htons(offsetof(dash_header_t, flow_data));
-	  /* Move customer packet after dash header */
-	  clib_memmove((u8*)&dh0->flow_data, (u8*)dh0 + length0, vlib_buffer_get_tail(b0) - (u8*)dh0 - length0);
+	  if (dh0->packet_meta.packet_subtype != FLOW_DELETE) {
+	    /* Only keep packet_meta and flow_key in dash_header_t */
+	    u16 length0 = ntohs(dh0->packet_meta.length);
+	    dh0->packet_meta.length = htons(offsetof(dash_header_t, flow_data));
+	    /* Move customer packet after dash header */
+	    clib_memmove((u8*)&dh0->flow_data, (u8*)dh0 + length0, vlib_buffer_get_tail(b0) - (u8*)dh0 - length0);
+	    b0->current_length -= length0 - offsetof(dash_header_t, flow_data);
+	  }
 
 	  vlib_buffer_reset (b0);
-	  b0->current_length -= length0 - offsetof(dash_header_t, flow_data);
 
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
